@@ -1,0 +1,859 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Mini Halo Shooter — Custom Edition</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          'bronze': '#CD7F32',
+          'silver': '#C0C0C0',
+          'gold': '#FFD700',
+          'rank-default': '#fff',
+        }
+      }
+    }
+  }
+</script>
+<style>
+  body { margin:0; overflow:hidden; background:#000; color:#fff; font-family:'Inter', sans-serif; }
+  canvas { display:block; background: radial-gradient(circle at center,#222,#000); }
+  #menu { 
+    position:fixed; 
+    inset:0; 
+    display:flex; 
+    flex-direction: column;
+    justify-content:center; 
+    align-items:center; 
+    background:#000; 
+    z-index:10;
+    gap: 20px; /* Space between buttons */
+  }
+  #menuBg { position:absolute; inset:0; z-index:1; }
+  .menu-button { 
+    position:relative; 
+    z-index:2; 
+    font-size:32px; /* Slightly smaller for two buttons */
+    padding:16px 48px; 
+    color:#fff; 
+    background:rgba(80,0,0,0.9); 
+    border-radius:12px; 
+    border:3px solid #f33; 
+    cursor:pointer;
+    transition: all 0.2s ease;
+    box-shadow: 0 0 15px rgba(255,51,51,0.5);
+  }
+  .menu-button:hover { 
+    transform:scale(1.05); 
+    box-shadow: 0 0 25px rgba(255,51,51,0.8);
+  }
+  #hint { position:fixed; left:12px; bottom:12px; color:#aaa; font-size:13px; z-index:20; }
+  #rankedPointsDisplay {
+    position: fixed;
+    top: 10px;
+    right: 10px;
+    padding: 8px 16px;
+    border-radius: 8px;
+    z-index: 20;
+    background: rgba(0, 0, 0, 0.7);
+    font-size: 18px;
+    font-weight: bold;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+</style>
+</head>
+<body>
+<div id="rankedPointsDisplay" class="text-rank-default">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5">
+    <path fill-rule="evenodd" d="M10.788 3.212a.75.75 0 0 0-1.576 0l-1.325 3.314a.75.75 0 0 1-.506.417l-3.32.969a.75.75 0 0 0 0 1.451l3.32.97a.75.75 0 0 1 .505.416l1.326 3.313a.75.75 0 0 0 1.576 0l1.325-3.314a.75.75 0 0 1 .507-.417l3.32-.969a.75.75 0 0 0 0-1.451l-3.32-.97a.75.75 0 0 1-.506-.416l-1.325-3.313Z" clip-rule="evenodd" />
+  </svg>
+  RP: <span id="rpValue">0</span>
+</div>
+
+<canvas id="game"></canvas>
+<div id="menu">
+  <canvas id="menuBg"></canvas>
+  <div class="relative z-20 flex flex-col gap-5">
+    <button id="playButton" class="menu-button bg-blue-700 hover:bg-blue-600 border-blue-400 shadow-blue-500/50">
+      Classic Play
+    </button>
+    <button id="rankedButton" class="menu-button bg-red-700 hover:bg-red-600 border-red-400 shadow-red-500/50">
+      Ranked Mode
+    </button>
+  </div>
+</div>
+<div id="hint">Left click = shoot · Right click = explosion (heals 10 HP) · Shift = ultimate · E = dash · R = reload</div>
+
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+  import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+  import { getFirestore, doc, setDoc, getDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+  import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+  
+  // Set Firebase log level to Debug
+  setLogLevel('Debug');
+
+  // --- Global Firebase Variables (MUST be used) ---
+  const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+  const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+  const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+  let db, auth, userId = null;
+
+  // Initialize Firebase and Authenticate
+  try {
+    const app = initializeApp(firebaseConfig);
+    db = getFirestore(app);
+    auth = getAuth(app);
+    
+    // Auth logic
+    onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        window.userId = user.uid;
+        console.log("Authenticated with UID:", window.userId);
+        window.loadRankedPoints();
+      } else {
+        // If not logged in, try to sign in with custom token or anonymously
+        try {
+          if (initialAuthToken) {
+            const userCredential = await signInWithCustomToken(auth, initialAuthToken);
+            window.userId = userCredential.user.uid;
+            console.log("Signed in with custom token. UID:", window.userId);
+          } else {
+            const userCredential = await signInAnonymously(auth);
+            window.userId = userCredential.user.uid;
+            console.log("Signed in anonymously. UID:", window.userId);
+          }
+          window.loadRankedPoints();
+        } catch (error) {
+          console.error("Firebase Auth Error:", error);
+          // Fallback to a random ID if auth fails completely
+          window.userId = crypto.randomUUID();
+          window.loadRankedPoints(); 
+        }
+      }
+    });
+
+    // Expose Firestore methods to the global window object for the main script
+    window.db = db;
+    window.doc = doc;
+    window.setDoc = setDoc;
+    window.onSnapshot = onSnapshot;
+    window.appId = appId;
+    
+  } catch (e) {
+    console.error("Firebase initialization failed:", e);
+    // Continue with game but without persistence if Firebase fails
+    window.userId = crypto.randomUUID();
+    window.db = null;
+    window.doc = () => {};
+    window.setDoc = () => {};
+    window.onSnapshot = () => {};
+    window.appId = 'default-app-id';
+  }
+</script>
+
+<script>
+  /* === Global Game State & Persistence === */
+  let isRankedMode = false;
+  let rankedPoints = 0;
+  const RP_KEY = 'mini_halo_rp'; // Key for the document in Firestore
+  
+  // Rank Tiers
+  const BRONZE_TIER = 100;
+  const SILVER_TIER = 250;
+  const GOLD_TIER = 450;
+  
+  const rpValueEl = document.getElementById('rpValue');
+  const rpDisplayEl = document.getElementById('rankedPointsDisplay');
+
+  function getRankColor(rp) {
+    if (rp >= GOLD_TIER) return { color: 'gold', display: 'Gold' };
+    if (rp >= SILVER_TIER) return { color: 'silver', display: 'Silver' };
+    if (rp >= BRONZE_TIER) return { color: 'bronze', display: 'Bronze' };
+    return { color: 'rank-default', display: 'Unranked' };
+  }
+
+  function updateRPDisplay(rp) {
+    rpValueEl.textContent = Math.floor(rp);
+    const { color } = getRankColor(rp);
+    // NOTE: Tailwind classes for colors are modified here to be dynamic for display updates.
+    // The original class list is preserved for proper visual display.
+    rpDisplayEl.className = `text-${color} fixed top-10 right-10 p-2 rounded-lg z-20 bg-gray-900/70 font-bold flex items-center gap-2`;
+  }
+
+  window.loadRankedPoints = () => {
+    if (!window.db || !window.userId) return;
+
+    // Path: /artifacts/{appId}/users/{userId}/game_state/mini_halo_scores
+    const rpDocRef = window.doc(window.db, 
+      'artifacts', window.appId, 
+      'users', window.userId, 
+      'game_state', RP_KEY);
+
+    window.onSnapshot(rpDocRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        rankedPoints = data.score || 0;
+        console.log("Loaded Ranked Points:", rankedPoints);
+      } else {
+        rankedPoints = 0;
+        console.log("No ranked score found, starting at 0.");
+      }
+      updateRPDisplay(rankedPoints);
+    }, (error) => {
+      console.error("Firestore onSnapshot error:", error);
+    });
+  };
+
+  function saveRankedPoints(newScore) {
+    if (!window.db || !window.userId) {
+      console.warn("Cannot save score: Firebase not ready.");
+      rankedPoints = newScore;
+      updateRPDisplay(rankedPoints);
+      return;
+    }
+
+    const rpDocRef = window.doc(window.db, 
+      'artifacts', window.appId, 
+      'users', window.userId, 
+      'game_state', RP_KEY);
+      
+    window.setDoc(rpDocRef, { score: newScore, lastUpdated: new Date() }, { merge: true })
+      .then(() => {
+        console.log("Ranked Points saved successfully:", newScore);
+      })
+      .catch(error => {
+        console.error("Error saving Ranked Points:", error);
+      });
+    
+    rankedPoints = newScore;
+    updateRPDisplay(rankedPoints);
+  }
+
+  /* === Audio synthesis section (shoot sound updated) === */
+  function makeWavBlobUrl(samples, sampleRate = 44100) {
+    const buffer = new ArrayBuffer(44 + samples.length * 2);
+    const view = new DataView(buffer);
+    function wstr(v, o, s){for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i));}
+    wstr(view,0,"RIFF"); view.setUint32(4,36+samples.length*2,true);
+    wstr(view,8,"WAVEfmt "); view.setUint32(16,16,true); view.setUint16(20,1,true);
+    view.setUint16(22,1,true); view.setUint32(24,sampleRate,true); view.setUint32(28,sampleRate*2,true);
+    view.setUint16(32,2,true); view.setUint16(34,16,true); wstr(view,36,"data");
+    view.setUint32(40,samples.length*2,true);
+    let o=44; for(let i=0;i<samples.length;i++,o+=2){
+      let s=Math.max(-1,Math.min(1,samples[i]));
+      view.setInt16(o,s<0?s*0x8000:s*0x7FFF,true);
+    }
+    return URL.createObjectURL(new Blob([view],{type:"audio/wav"}));
+  }
+  function saw(f,t){let x=(t*f)%1;return 2*x-1;}
+  function noise(){return Math.random()*2-1;}
+
+  /* === Shooting Sound (laser-like) === */
+  function synthShoot(d=0.20,sr=44100){
+    const len = Math.floor(d*sr);
+    const s = new Float32Array(len);
+    for(let i=0;i<len;i++){
+      const t = i/sr;
+      const f = 1200 - 1000*t; 
+      const main = Math.sin(2*Math.PI*f*t);
+      const overtone = Math.sin(2*Math.PI*f*2*t)*0.3;
+      const buzz = saw(f*1.5,t)*0.2;
+      const click = noise()*0.05*Math.exp(-50*t);
+      const env = Math.pow(Math.sin(Math.min(1,t/0.03)*Math.PI/2),2)*Math.exp(-8*t);
+      s[i] = (main*0.9 + overtone + buzz + click)*env;
+    }
+    return makeWavBlobUrl(s,sr);
+  }
+
+  function synthHit(d=0.25,sr=44100){const len=Math.floor(d*sr),s=new Float32Array(len);for(let i=0;i<len;i++){let t=i/sr;let n=noise()*Math.exp(-10*t)*0.9;let th=Math.sin(2*Math.PI*120*t)*Math.exp(-6*t)*0.9;s[i]=(n*0.6+th*0.7)*(1-0.2*t);}return makeWavBlobUrl(s,sr);}
+  function synthKill(d=1.0,sr=44100){const len=Math.floor(d*sr),s=new Float32Array(len);for(let i=0;i<len;i++){let t=i/sr;let r=Math.sin(2*Math.PI*(60+20*Math.sin(2*Math.PI*0.25*t))*t)*0.9+Math.sin(2*Math.PI*(100+30*Math.sin(2*Math.PI*0.12*t))*t)*0.4;let o=Math.sin(2*Math.PI*(300+1800*(t/d))*t)*Math.exp(-1.6*t)*0.6;let n=noise()*Math.exp(-2*t)*0.5;let env=Math.exp(-1.2*t);s[i]=(r*0.6+o*0.9+n*0.8)*env*0.9;}return makeWavBlobUrl(s,sr);}
+  function synthUltimate(d=2.4,sr=44100){const len=Math.floor(d*sr),s=new Float32Array(len);for(let i=0;i<len;i++){let t=i/sr;let bf=180*Math.pow(0.25,t/(d*0.9));let b=Math.sin(2*Math.PI*bf*t)*Math.exp(-0.3*t);let sf=400+2200*(t/d);let sw=saw(sf,t)*Math.exp(-0.8*t)*0.8;let w=noise()*Math.exp(-0.2*(d-t))*Math.min(1,t*2);let env=Math.sin(Math.min(1,t/(d*0.12))*(Math.PI/2))*Math.exp(-0.2*t);s[i]=(b*0.9+sw*0.8+w*0.6)*env*0.9;}return makeWavBlobUrl(s,sr);}
+  function synthDash(d=0.20,sr=44100){const len=Math.floor(d*sr),s=new Float32Array(len);for(let i=0;i<len;i++){const t=i/sr;const n=noise()*Math.exp(-6*t)*0.95;const toneFreq=200+900*Math.pow(t,0.75);const tone=Math.sin(2*Math.PI*toneFreq*t)*Math.exp(-3.5*t)*0.45;const breath=(noise()*0.6+noise()*0.4)*Math.exp(-4*t)*0.5;const env=Math.sin(Math.min(1,t/0.06)*(Math.PI/2))*Math.exp(-3.4*t);s[i]=(n*0.8+tone*0.5+breath*0.4)*env*0.95;}return makeWavBlobUrl(s,sr);}
+
+  const soundUrls = {
+    shoot: synthShoot(), hit: synthHit(), kill: synthKill(), ultimate: synthUltimate(), dash: synthDash()
+  };
+  const audioElems = {
+    shoot: new Audio(soundUrls.shoot), hit: new Audio(soundUrls.hit), kill: new Audio(soundUrls.kill), ultimate: new Audio(soundUrls.ultimate), dash: new Audio(soundUrls.dash)
+  };
+  audioElems.shoot.volume = 0.15; audioElems.hit.volume = 0.7; audioElems.kill.volume = 0.85;
+  audioElems.ultimate.volume = 0.9; audioElems.dash.volume = 1.0;
+  function playSound(n){
+    const b = audioElems[n];
+    if(!b) return;
+    const a = b.cloneNode(); a.volume = b.volume;
+    a.play().catch(()=>{});
+  }
+
+  /* === Game logic === */
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  canvas.width = innerWidth; canvas.height = innerHeight;
+  const menu = document.getElementById("menu");
+  const menuBg = document.getElementById("menuBg");
+  const mctx = menuBg.getContext("2d");
+  menuBg.width = innerWidth; menuBg.height = innerHeight;
+
+  const keys = {};
+  let mouse = {x:0,y:0,left:false,right:false};
+
+  let lastExplosion = 0, explosionCooldown = 3000, gameOver = false, inGame = false;
+  let explosionAnim = null, EXPLOSION_DURATION = 1000, EXPLOSION_RADIUS = 220;
+  let MAP_DIAGONAL = Math.sqrt(canvas.width**2 + canvas.height**2);
+  
+  let ULTIMATE_COOLDOWN = 40000; 
+  let lastUltimateUsed = -ULTIMATE_COOLDOWN;
+  
+  const NORMAL_HEALTH = 100, ULTIMATE_HEALTH = 250;
+  
+  const BASE_ENEMY_SPEED = 6.8; 
+  const BOSS_ENEMY_SPEED = 7.6; 
+  const BULLET_SPEED = 5.5;     
+
+  const player = { x: canvas.width/2, y: canvas.height/2, size:25, color:"#fff", health: NORMAL_HEALTH, speed:4 };
+  let bullets = [], enemies = [], kills = 0, lastFrame = performance.now(), fps = 0, enemySpawner, bossSpawner = null;
+
+  let lastBulletDir = {x:1,y:0};
+  let lastDashTime = -5000;
+  
+  const DASH_COOLDOWN = 8000;
+  
+  let DASH_DISTANCE = MAP_DIAGONAL / 8;
+  let dashTrails = [];
+  const TRAIL_LIFE = 450;
+  const TRAIL_WIDTH = 26;
+
+  let ammo = 850;
+  const MAX_AMMO = 850;
+  let reloading = false;
+  const RELOAD_TIME = 850;
+
+  function spawnEnemy(boss=false){
+    const s = Math.floor(Math.random()*4);
+    let x,y;
+    if(s===0){ x = Math.random()*canvas.width; y = -20; }
+    else if(s===1){ x = canvas.width + 20; y = Math.random()*canvas.height; }
+    else if(s===2){ x = Math.random()*canvas.width; y = canvas.height + 20; }
+    else { x = -20; y = Math.random()*canvas.height; }
+    
+    enemies.push(boss 
+      ? {x,y,size:40,color:"#a00",health:25,speed:BOSS_ENEMY_SPEED,boss:true} 
+      : {x,y,size:20,color:"#888",health:5,speed:BASE_ENEMY_SPEED,boss:false});
+  }
+  function spawnEnemies(){ for(let i=0;i<3;i++) spawnEnemy(); }
+
+  document.addEventListener("keydown", e=>{
+    keys[e.key.toLowerCase()] = true;
+    
+    if(e.key === " " && gameOver) {
+        menu.style.display = "flex";
+        inGame = false;
+        gameOver = false; 
+        return;
+    }
+
+    if (gameOver || player.health <= 0) return;
+    
+    if(e.key === "Shift" && inGame){ activateUltimate(); playSound("ultimate"); }
+    if(e.key.toLowerCase() === "r" && inGame && !reloading) startReload();
+    if(e.key.toLowerCase() === "e" && inGame) tryDash();
+
+  });
+  document.addEventListener("keyup", e => keys[e.key.toLowerCase()] = false);
+  canvas.addEventListener("mousemove", e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+  canvas.addEventListener("mousedown", e => { 
+    if(player.health > 0) { 
+        if(e.button===0) mouse.left=true; 
+        if(e.button===2) mouse.right=true; 
+    }
+  });
+  canvas.addEventListener("mouseup", e => { 
+    if(e.button===0) mouse.left=false; 
+    if(e.button===2) mouse.right=false; 
+  });
+  canvas.addEventListener("contextmenu", e => e.preventDefault());
+
+  function startReload(){
+    reloading = true;
+    playSound("hit");
+    setTimeout(()=>{ ammo = MAX_AMMO; reloading = false; }, RELOAD_TIME);
+  }
+
+  function movePlayer(){
+    if(keys.w) player.y -= player.speed;
+    if(keys.s) player.y += player.speed;
+    if(keys.a) player.x -= player.speed;
+    if(keys.d) player.x += player.speed;
+    player.x = Math.max(player.size, Math.min(canvas.width - player.size, player.x));
+    player.y = Math.max(player.size, Math.min(canvas.height - player.size, player.y));
+  }
+
+  function shoot(){
+    if(reloading) return;
+    if(ammo <= 0){ startReload(); return; }
+    const a = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+    const dx = Math.cos(a)*BULLET_SPEED, dy = Math.sin(a)*BULLET_SPEED; 
+    bullets.push({x:player.x, y:player.y, dx, dy});
+    lastBulletDir = {x: Math.cos(a), y: Math.sin(a)};
+    playSound("shoot");
+    ammo--;
+  }
+
+  function distPointToSegment(px,py,ax,ay,bx,by){
+    const vx = bx-ax, vy = by-ay;
+    const wx = px-ax, wy = py-ay;
+    const c1 = vx*wx + vy*wy;
+    if(c1 <= 0) return Math.hypot(px-ax, py-ay);
+    const c2 = vx*vx + vy*vy;
+    if(c2 <= c1) return Math.hypot(px-bx, py-by);
+    const t = c1 / c2;
+    const projx = ax + vx*t, projy = ay + vy*t;
+    return Math.hypot(px-projx, projy-py);
+  }
+
+  function tryDash(){
+    const now = Date.now();
+    if(now - lastDashTime < DASH_COOLDOWN) return;
+    lastDashTime = now;
+
+    DASH_DISTANCE = Math.sqrt(canvas.width*canvas.width + canvas.height*canvas.height) / 8;
+
+    const sx = player.x, sy = player.y;
+    const ex = player.x + lastBulletDir.x * DASH_DISTANCE;
+    const ey = player.y + lastBulletDir.y * DASH_DISTANCE;
+
+    const clampedEx = Math.max(player.size, Math.min(canvas.width - player.size, ex));
+    const clampedEy = Math.max(player.size, Math.min(canvas.height - player.size, ey));
+
+    dashTrails.push({x1: sx, y1: sy, x2: clampedEx, y2: clampedEy, created: now, life: TRAIL_LIFE});
+
+    playSound("dash");
+
+    let killed = 0;
+    enemies = enemies.filter(e=>{
+      const d = distPointToSegment(e.x, e.y, sx, sy, clampedEx, clampedEy);
+      if(d <= e.size + 2){
+        killed++;
+        playSound("kill");
+        return false;
+      }
+      return true;
+    });
+    kills += killed;
+
+    player.x = clampedEx;
+    player.y = clampedEy;
+
+    // Dash healing is modified to check for ULTIMATE_HEALTH first
+    if(player.health < ULTIMATE_HEALTH){
+      player.health = Math.min(player.health + 50, ULTIMATE_HEALTH);
+    }
+    
+    explosionAnim = {start: now, duration: 220, maxR: 60, dashFlash: true};
+  }
+
+  function startExplosion(){
+    const now = Date.now();
+    if(now - lastExplosion < explosionCooldown) return false;
+    lastExplosion = now;
+    explosionAnim = {start: now, duration: EXPLOSION_DURATION, maxR: EXPLOSION_RADIUS};
+    const before = enemies.length;
+    enemies = enemies.filter(e => Math.hypot(e.x - player.x, e.y - player.y) > EXPLOSION_RADIUS);
+    kills += before - enemies.length;
+    if(before - enemies.length > 0) playSound("kill");
+    
+    // --- USER REQUESTED CHANGE: HEAL 15 HP on Explosion ---
+    const maxHP = player.health >= NORMAL_HEALTH ? ULTIMATE_HEALTH : NORMAL_HEALTH;
+    player.health = Math.min(player.health + 15, maxHP);
+    // --- END USER REQUESTED CHANGE ---
+    
+    return true;
+  }
+  function activateUltimate(){
+    const now = Date.now();
+    if(now - lastUltimateUsed < ULTIMATE_COOLDOWN) return; 
+    lastUltimateUsed = now;
+    player.health = ULTIMATE_HEALTH;
+    explosionAnim = {start: now, duration: EXPLOSION_DURATION, maxR: MAP_DIAGONAL, ultimate: true};
+    if(enemies.length > 0) playSound("kill");
+    kills += enemies.length;
+    enemies = [];
+    lastDashTime = -DASH_COOLDOWN;
+  }
+
+  function calculateRankChange(totalKills) {
+    // --- USER REQUESTED CHANGE: NEW RP TIERS ---
+    if (totalKills < 129) {
+      return -50; // Lose 50 RP if under the lowest threshold
+    } else if (totalKills < 150) {
+      return 50; // +50 RP for 130-149 kills
+    } else if (totalKills < 175) {
+      return 65; // +65 RP for 150-174 kills
+    } else { 
+      return 75; // +75 RP for 175+ kills
+    }
+    // --- END USER REQUESTED CHANGE ---
+  }
+
+  function handleGameOver() {
+    gameOver = true;
+    
+    if (isRankedMode) {
+      const rpChange = calculateRankChange(kills);
+      const newRP = Math.max(0, rankedPoints + rpChange);
+      saveRankedPoints(newRP);
+
+      let message = `You gained ${rpChange} RP!`;
+      if (rpChange < 0) message = `You lost ${Math.abs(rpChange)} RP.`;
+      
+      const newRank = getRankColor(newRP).display;
+      
+      // Update the Game Over display message (this logic is duplicated in draw function
+      // for immediate visual update and HTML overlay creation)
+      const gameOverEl = document.getElementById('gameOverMessage');
+      if (gameOverEl) {
+          const { color } = getRankColor(newRP);
+          gameOverEl.innerHTML = `
+            <h1 class="text-5xl font-extrabold text-red-500 mb-2">RANKED RUN ENDED</h1>
+            <p class="text-xl text-white mb-4">Total Kills: ${kills}</p>
+            <p class="text-3xl font-bold mb-4 ${rpChange >= 0 ? 'text-green-400' : 'text-red-400'}">${message}</p>
+            <p class="text-2xl text-white">New RP: <span class="text-${color}">${Math.floor(newRP)} (${newRank})</span></p>
+            <p class="text-sm text-gray-400 mt-4">Press SPACE to Restart</p>
+          `;
+      }
+    }
+  }
+
+  function update(){
+    if(!inGame || gameOver) return; 
+
+    movePlayer();
+    if(mouse.left) shoot();
+    if(mouse.right && startExplosion()) mouse.right = false;
+
+    bullets.forEach(b => { b.x += b.dx; b.y += b.dy; });
+    bullets = bullets.filter(b => b.x > 0 && b.x < canvas.width && b.y > 0 && b.y < canvas.height);
+
+    enemies.forEach(e => { 
+        // Enemies chase as long as player is alive
+        const a = Math.atan2(player.y - e.y, player.x - e.x); 
+        e.x += Math.cos(a) * e.speed; 
+        e.y += Math.sin(a) * e.speed; 
+    });
+
+    for(let b of bullets){
+      for(let e of enemies){
+        if(Math.hypot(b.x - e.x, b.y - e.y) < e.size){
+          e.health--;
+          b.x = -9999;
+        }
+      }
+    }
+    enemies = enemies.filter(e => {
+      if(e.health <= 0){ kills++; playSound("kill"); return false; }
+      return true;
+    });
+
+    enemies.forEach(e => {
+      if(Math.hypot(e.x - player.x, e.y - player.y) < e.size + player.size){
+        // Bosses deal 50 damage, regular enemies deal 20 damage after 10 kills, 10 before
+        player.health -= e.boss ? 50 : (kills >= 10 ? 20 : 10);
+        e.health = 0;
+        playSound("hit");
+      }
+    });
+
+    if(player.health <= 0){ 
+      player.health = 0; 
+      if(bossSpawner) clearInterval(bossSpawner); 
+      handleGameOver();
+    }
+    if(kills >= 75 && !bossSpawner) bossSpawner = setInterval(()=>spawnEnemy(true), 2000);
+
+    const n = performance.now(); fps = 1000 / (n - lastFrame); lastFrame = n;
+  }
+
+  function drawDashTrails(){
+    const now = Date.now();
+    for(let i = dashTrails.length - 1; i >= 0; i--){
+      const t = dashTrails[i];
+      const age = now - t.created;
+      if(age > t.life){ dashTrails.splice(i,1); continue; }
+      const p = 1 - (age / t.life);
+      ctx.save();
+      ctx.lineCap = "round";
+      const w = TRAIL_WIDTH * (0.5 + 0.5*p);
+      ctx.lineWidth = w;
+      ctx.globalAlpha = 0.95 * p;
+      const grad = ctx.createLinearGradient(t.x1, t.y1, t.x2, t.y2);
+      grad.addColorStop(0, `rgba(180,240,255,${0.95*p})`);
+      grad.addColorStop(0.5, `rgba(120,200,255,${0.55*p})`);
+      grad.addColorStop(1, `rgba(40,120,255,0)`);
+      ctx.strokeStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(t.x1, t.y1);
+      ctx.lineTo(t.x2, t.y2);
+      ctx.stroke();
+      ctx.globalAlpha = 0.98 * (p*p);
+      ctx.lineWidth = Math.max(2, w*0.25);
+      ctx.strokeStyle = `rgba(230,255,255,${0.98*p})`;
+      ctx.beginPath();
+      ctx.moveTo(t.x1, t.y1);
+      ctx.lineTo(t.x2, t.y2);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  function drawExplosion(){
+    if(!explosionAnim) return;
+    const n = Date.now(), el = n - explosionAnim.start;
+    if(el > explosionAnim.duration){ explosionAnim = null; return; }
+    const p = el / explosionAnim.duration, r = explosionAnim.maxR * p, a = 1 - p;
+    ctx.beginPath();
+    const g = ctx.createRadialGradient(player.x, player.y, r*0.1, player.x, player.y, r);
+    if(explosionAnim.dashFlash){
+      g.addColorStop(0, `rgba(180,220,255,${a*0.95})`);
+      g.addColorStop(1, `rgba(180,220,255,0)`);
+    } else if (explosionAnim.ultimate) {
+      g.addColorStop(0, `rgba(100, 0, 180, ${a*0.8})`);
+      g.addColorStop(1, `rgba(50, 0, 90, 0)`);
+    } else {
+      g.addColorStop(0, `rgba(255,180,0,${a*0.8})`);
+      g.addColorStop(1, `rgba(255,100,0,0)`);
+    }
+    ctx.fillStyle = g;
+    ctx.arc(player.x, player.y, r, 0, Math.PI*2);
+    ctx.fill();
+    ctx.closePath();
+  }
+
+  function draw(){
+    if(!inGame) return;
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    drawDashTrails();
+
+    if (player.health > 0) { // Only draw player if alive
+        ctx.beginPath();
+        ctx.arc(player.x, player.y, player.size, 0, Math.PI*2);
+        ctx.fillStyle = player.color;
+        ctx.fill();
+        ctx.closePath();
+
+        ctx.strokeStyle = "#000";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(player.x - player.size, player.y);
+        ctx.lineTo(player.x + player.size, player.y);
+        ctx.moveTo(player.x, player.y - player.size);
+        ctx.lineTo(player.x, player.y + player.size);
+        ctx.stroke();
+    }
+
+
+    ctx.fillStyle = "#ff0";
+    bullets.forEach(b => ctx.fillRect(b.x - 3, b.y - 3, 6, 6));
+
+    enemies.forEach(e => {
+      ctx.beginPath();
+      ctx.arc(e.x, e.y, e.size, 0, Math.PI*2);
+      const g = ctx.createRadialGradient(e.x, e.y, 5, e.x, e.y, e.size);
+      g.addColorStop(0, e.boss ? "#f00" : "#aaa");
+      g.addColorStop(1, e.boss ? "#800" : "#555");
+      ctx.fillStyle = g;
+      ctx.fill();
+      ctx.closePath();
+
+      const es = 5;
+      ctx.fillStyle = "#f00";
+      ctx.fillRect(e.x - e.size/3 - es/2, e.y - e.size/3 - es/2, es, es);
+      ctx.fillRect(e.x + e.size/3 - es/2, e.y - e.size/3 - es/2, es, es);
+    });
+
+    drawExplosion();
+
+    ctx.fillStyle = "#fff";
+    ctx.font = "20px Arial";
+    ctx.textAlign = "left";
+    ctx.fillText("Health: " + Math.floor(player.health), 20, 30);
+    ctx.fillText("Ammo: " + ammo + " / " + MAX_AMMO, 20, 60);
+    ctx.fillText("Kills: " + kills, 20, 90);
+    ctx.fillText("FPS: " + fps.toFixed(0), 20, 120);
+    
+    // Draw in-game Ranked Info (Top Right)
+    if(isRankedMode) {
+      const { color, display } = getRankColor(rankedPoints);
+      ctx.textAlign = "right";
+      ctx.font = `bold 24px Arial`;
+      ctx.fillStyle = color; 
+      ctx.fillText(`${Math.floor(rankedPoints)} RP (${display})`, canvas.width - 20, 30);
+      ctx.textAlign = "left"; // Reset alignment
+    }
+
+
+    const now = Date.now();
+    const expCD = Math.max(0, (explosionCooldown - (now - lastExplosion)) / 1000);
+    const ultCD = Math.max(0, (ULTIMATE_COOLDOWN - (now - lastUltimateUsed)) / 1000); 
+    const dashCD = Math.max(0, (DASH_COOLDOWN - (now - lastDashTime)) / 1000);
+    
+    // Highlight explosion CD text if it's healing now.
+    ctx.fillStyle = expCD > 0 ? "#fff" : "#0f0";
+    ctx.fillText("Explosion CD (Heals 10 HP): " + (expCD > 0 ? expCD.toFixed(1) + "s" : "Ready"), 20, canvas.height - 80);
+    
+    ctx.fillStyle = dashCD > 0 ? "#fff" : "#0f0";
+    ctx.fillText("Dash CD: " + (dashCD > 0 ? dashCD.toFixed(1) + "s" : "Ready"), 20, canvas.height - 50);
+
+    ctx.fillStyle = ultCD > 0 ? "#fff" : "#0f0";
+    ctx.fillText("Ultimate CD: " + (ultCD > 0 ? ultCD.toFixed(1) + "s" : "Ready"), 20, canvas.height - 20);
+
+    ctx.fillStyle = "#fff"; // Reset color
+
+    if(reloading){
+      ctx.font = "40px Arial";
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#ff0";
+      ctx.fillText("Reloading...", canvas.width/2, canvas.height/2);
+    }
+    
+    // --- Display Game Over Screen (HTML Overlay) ---
+    const showOverlay = gameOver;
+
+    if(showOverlay){
+      ctx.fillStyle = "rgba(0,0,0,0.7)";
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+      
+      // Ensure the HTML overlay element exists
+      if (!document.getElementById('gameOverScreen')) {
+        const div = document.createElement('div');
+        div.id = 'gameOverScreen';
+        div.className = 'fixed inset-0 flex justify-center items-center z-30 pointer-events-none';
+        div.innerHTML = `<div id="gameOverMessage" class="text-center bg-gray-900/90 p-8 rounded-xl shadow-2xl"></div>`;
+        document.body.appendChild(div);
+      }
+      
+      const goScreen = document.getElementById('gameOverScreen');
+      goScreen.style.display = 'flex';
+
+      const goMessage = document.getElementById('gameOverMessage');
+      if (goMessage) {
+        if (!isRankedMode) {
+          goMessage.innerHTML = `
+            <h1 class="text-5xl font-extrabold text-red-500 mb-4">GAME OVER</h1>
+            <p class="text-xl text-white mb-6">Total Kills: ${kills}</p>
+            <p class="text-2xl text-white">Press SPACE to Restart</p>
+          `;
+        } else {
+          // Ranked Mode Game Over Message
+          const rpChange = calculateRankChange(kills);
+          const newRP = Math.max(0, rankedPoints + rpChange);
+          const { color, display } = getRankColor(newRP);
+          let message = `You gained ${rpChange} RP!`;
+          if (rpChange < 0) message = `You lost ${Math.abs(rpChange)} RP.`;
+
+          // NOTE: Tailwind class for text color in the span is generated dynamically
+          goMessage.innerHTML = `
+            <h1 class="text-5xl font-extrabold text-red-500 mb-2">RANKED RUN ENDED</h1>
+            <p class="text-xl text-white mb-4">Total Kills: ${kills}</p>
+            <p class="text-3xl font-bold mb-4 ${rpChange >= 0 ? 'text-green-400' : 'text-red-400'}">${message}</p>
+            <p class="text-2xl text-white">New RP: <span class="text-${color}">${Math.floor(newRP)} (${display})</span></p>
+            <p class="text-sm text-gray-400 mt-4">Press SPACE to Restart</p>
+          `;
+        }
+      }
+      
+    } else {
+      const goScreen = document.getElementById('gameOverScreen');
+      if (goScreen) goScreen.style.display = 'none';
+    }
+  }
+
+  function resetGame(ranked) {
+    // Hide Game Over Screen if present
+    const goScreen = document.getElementById('gameOverScreen');
+    if (goScreen) goScreen.style.display = 'none';
+    
+    isRankedMode = ranked;
+    player.health = NORMAL_HEALTH;
+    player.x = canvas.width/2; player.y = canvas.height/2;
+    bullets = []; enemies = []; kills = 0; ammo = MAX_AMMO; reloading = false;
+    lastExplosion = 0;
+    explosionAnim = null; gameOver = false; inGame = true;
+    lastDashTime = -DASH_COOLDOWN;
+    dashTrails = [];
+    
+    // Ultimate cooldown changes based on mode
+    if (isRankedMode) {
+      ULTIMATE_COOLDOWN = 35000; 
+    } else {
+      ULTIMATE_COOLDOWN = 40000; 
+    }
+    lastUltimateUsed = -ULTIMATE_COOLDOWN; 
+    
+    if(enemySpawner) clearInterval(enemySpawner);
+    if(bossSpawner){ clearInterval(bossSpawner); bossSpawner = null; }
+    enemySpawner = setInterval(spawnEnemies, 1000);
+    
+    // Ensure the RP display is visible/hidden based on mode
+    rpDisplayEl.style.display = isRankedMode ? 'flex' : 'none'; 
+  }
+
+  // --- Button Handlers ---
+  document.getElementById("playButton").addEventListener("click", ()=>{
+    isRankedMode = false;
+    playSound("shoot"); 
+    menu.style.display = "none";
+    rpDisplayEl.style.display = 'none'; // Hide RP for classic mode
+    resetGame(false);
+  });
+  
+  document.getElementById("rankedButton").addEventListener("click", ()=>{
+    isRankedMode = true;
+    playSound("shoot"); 
+    menu.style.display = "none";
+    rpDisplayEl.style.display = 'flex'; // Show RP for ranked mode
+    resetGame(true);
+  });
+
+  window.addEventListener("resize", ()=>{
+    canvas.width = innerWidth; canvas.height = innerHeight;
+    menuBg.width = innerWidth; menuBg.height = innerHeight;
+    MAP_DIAGONAL = Math.sqrt(canvas.width**2 + canvas.height**2);
+    DASH_DISTANCE = MAP_DIAGONAL / 8;
+  });
+
+  // The game loop now uses requestAnimationFrame for stable, v-sync-compatible FPS.
+  function loop(){ update(); draw(); requestAnimationFrame(loop); }
+  requestAnimationFrame(loop);
+
+  let rects = [];
+  for(let i=0;i<100;i++){
+    rects.push({x:Math.random()*menuBg.width,y:Math.random()*menuBg.height,w:50+Math.random()*100,h:30+Math.random()*60,dx:(Math.random()-0.5)*2,dy:(Math.random()-0.5)*2,color:Math.random()>0.5?"rgba(255,0,0,0.3)":"rgba(100,100,100,0.3)"});
+  }
+  function drawMenuBg(){
+    mctx.clearRect(0,0,menuBg.width,menuBg.height);
+    rects.forEach(r=>{
+      mctx.fillStyle=r.color; mctx.fillRect(r.x,r.y,r.w,r.h);
+      r.x += r.dx; r.y += r.dy;
+      if(r.x < -r.w) r.x = menuBg.width;
+      if(r.x > menuBg.width) r.x = -r.w;
+      if(r.y < -r.h) r.y = menuBg.height;
+      if(r.y > menuBg.height) r.y = -r.h;
+    });
+    requestAnimationFrame(drawMenuBg);
+  }
+  drawMenuBg();
+  
+  // Set initial state of RP display to be visible on the menu
+  rpDisplayEl.style.display = 'flex';
+</script>
+</body>
+</html>
